@@ -1,22 +1,29 @@
 import { AttachmentBuilder, Client, Events, Message } from "discord.js";
 import { assets } from "../asset";
 
-const TRIGGER_WORDS: Record<string, string> = {
-  anjing: assets.bonkExplosion,
+type TriggerResponse =
+  | { type: "file"; path: string }
+  | { type: "text"; content: string };
+
+const TRIGGERS: Record<string, TriggerResponse> = {
+  anjing: { type: "file", path: assets.bonkExplosion },
+  anomali: { type: "text", content: "yoshirawa" },
 };
 
 export function registerMessageCreateEvent(client: Client): void {
   client.on(Events.MessageCreate, async (message: Message) => {
-    // Ignore messages from bots (including ourselves)
     if (message.author.bot) return;
 
     const content = message.content.toLowerCase();
 
-    for (const [word, filePath] of Object.entries(TRIGGER_WORDS)) {
+    for (const [word, response] of Object.entries(TRIGGERS)) {
       if (content.includes(word)) {
-        const attachment = new AttachmentBuilder(filePath);
-        await message.reply({ files: [attachment] });
-        break;
+        if (response.type === "file") {
+          const attachment = new AttachmentBuilder(response.path);
+          await message.reply({ files: [attachment] });
+        } else {
+          await message.reply(response.content);
+        }
       }
     }
   });
