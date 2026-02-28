@@ -1,5 +1,6 @@
 import { AttachmentBuilder, Client, Events, Message } from "discord.js";
 import { assets } from "../asset";
+import { handleJailCommand, handleJailTracking } from "../commands/jail";
 
 type TriggerResponse =
   | { type: "file"; path: string }
@@ -14,6 +15,13 @@ export function registerMessageCreateEvent(client: Client): void {
   client.on(Events.MessageCreate, async (message: Message) => {
     if (message.author.bot) return;
 
+    // Handle commands
+    if (await handleJailCommand(message)) return;
+
+    // Track jailed users
+    await handleJailTracking(message);
+
+    // Trigger word responses
     const content = message.content.toLowerCase();
 
     for (const [word, response] of Object.entries(TRIGGERS)) {
