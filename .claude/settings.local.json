@@ -2,7 +2,24 @@
   "permissions": {
     "allow": [
       "Bash(npm install:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "WebFetch(domain:guildyapper.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:developers.veliainn.com)",
+      "WebFetch(domain:garmoth.com)",
+      "WebFetch(domain:discord.com)",
+      "WebFetch(domain:api.garmoth.com)",
+      "WebFetch(domain:www.naeu.playblackdesert.com)",
+      "WebFetch(domain:man90es.github.io)",
+      "WebFetch(domain:blackdesert.pearlabyss.com)",
+      "WebFetch(domain:bdolytics.com)",
+      "WebFetch(domain:lookingatyoufunny.com)",
+      "WebFetch(domain:community-api.cutepap.us)",
+      "WebFetch(domain:api.cutepap.us)",
+      "WebFetch(domain:www.postman.com)",
+      "WebFetch(domain:api.arsha.io)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(curl:*)"
     ]
   }
 }
