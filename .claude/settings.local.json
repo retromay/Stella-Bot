@@ -19,7 +19,8 @@
       "WebFetch(domain:www.postman.com)",
       "WebFetch(domain:api.arsha.io)",
       "WebFetch(domain:pypi.org)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(npm run build:*)"
     ]
   }
 }

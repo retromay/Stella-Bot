@@ -3,6 +3,7 @@ import { assets } from "@/asset";
 import { handleJailCommand, handleJailTracking } from "@/commands/jail";
 import { handleLfpCommand } from "@/commands/lfp";
 
+
 type TriggerResponse =
   | { type: "file"; path: string }
   | { type: "text"; content: string };
@@ -20,7 +21,6 @@ export function registerMessageCreateEvent(client: Client): void {
       // Handle commands
       if (await handleLfpCommand(message)) return;
       if (await handleJailCommand(message)) return;
-
       // Track jailed users
       await handleJailTracking(message);
 

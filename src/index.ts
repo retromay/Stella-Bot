@@ -3,6 +3,7 @@ import { config } from "@/config";
 import { registerReadyEvent } from "@/events/ready";
 import { registerMessageCreateEvent } from "@/events/messageCreate";
 import { registerMessageReactionAddEvent } from "@/events/messageReactionAdd";
+import { registerInteractionCreateEvent } from "@/events/interactionCreate";
 
 const client = new Client({
   intents: [
@@ -27,5 +28,6 @@ process.on("unhandledRejection", (error) => {
 registerReadyEvent(client);
 registerMessageCreateEvent(client);
 registerMessageReactionAddEvent(client);
+registerInteractionCreateEvent(client);
 
 client.login(config.discordToken);
