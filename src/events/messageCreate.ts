@@ -1,6 +1,6 @@
 import { AttachmentBuilder, Client, Events, Message } from "discord.js";
-import { assets } from "../asset";
-import { handleJailCommand, handleJailTracking } from "../commands/jail";
+import { assets } from "@/asset";
+import { handleJailCommand, handleJailTracking } from "@/commands/jail";
 
 type TriggerResponse =
   | { type: "file"; path: string }

@@ -1,5 +1,5 @@
 import { AttachmentBuilder, Message, PermissionFlagsBits } from "discord.js";
-import { assets } from "../asset";
+import { assets } from "@/asset";
 
 const JAIL_LIMIT = 50;
 const WARN_INTERVAL = 10;
@@ -28,7 +28,7 @@ export async function handleJailCommand(message: Message): Promise<boolean> {
 
   jailedUsers.set(target.id, JAIL_LIMIT);
   await message.reply(
-    `${target} has been jailed! ${JAIL_LIMIT} characters remaining. Choose your words wisely.`
+    `${target} has been jailed! ${JAIL_LIMIT} characters remaining. Choose your words wisely.`,
   );
   return true;
 }
@@ -43,7 +43,10 @@ export async function handleJailTracking(message: Message): Promise<void> {
   if (newRemaining <= 0) {
     jailedUsers.delete(message.author.id);
     const attachment = new AttachmentBuilder(assets.spongebobJail);
-    await message.reply({ content: "You are jailed now!", files: [attachment] });
+    await message.reply({
+      content: "You are jailed now!",
+      files: [attachment],
+    });
     return;
   }
 
