@@ -1,5 +1,8 @@
 import { Client, GatewayIntentBits, Partials } from "discord.js";
 import { config } from "@/config";
+import { initDatabase } from "@/services/database";
+import { loadLfpPartiesFromDb } from "@/commands/lfp";
+import { loadAttendanceSessionsFromDb } from "@/commands/attendance";
 import { registerReadyEvent } from "@/events/ready";
 import { registerMessageCreateEvent } from "@/events/messageCreate";
 import { registerMessageReactionAddEvent } from "@/events/messageReactionAdd";
@@ -24,6 +27,11 @@ client.on("error", (error) => {
 process.on("unhandledRejection", (error) => {
   console.error("[Unhandled Rejection]", error);
 });
+
+// Initialize database and load persisted state
+initDatabase();
+loadLfpPartiesFromDb();
+loadAttendanceSessionsFromDb();
 
 registerReadyEvent(client);
 registerMessageCreateEvent(client);

@@ -30,6 +30,7 @@ import type {
   AttendanceSession,
   RoleSignup,
 } from "@/types/attendance";
+import { saveAttendanceSession, deleteAttendanceSession, loadAllAttendanceSessions } from "@/services/database";
 
 // Discord modals support max 5 text inputs — split 7 roles into 5 + 2
 const MODAL_PHASE_0_COUNT = 5;
@@ -37,6 +38,14 @@ const MODAL_PHASE_0_COUNT = 5;
 // In-memory storage keyed by message ID
 const activeSetups = new Map<string, AttendanceSetup>();
 const activeSessions = new Map<string, AttendanceSession>();
+
+export function loadAttendanceSessionsFromDb(): void {
+  const sessions = loadAllAttendanceSessions();
+  for (const session of sessions) {
+    activeSessions.set(session.messageId, session);
+  }
+  console.log(`Loaded ${sessions.length} attendance sessions from database.`);
+}
 
 // ─── Slash Command Definition ────────────────────────────────────────────────
 
@@ -490,6 +499,7 @@ async function handleSetupConfirm(
 
   session.messageId = sent.id;
   activeSessions.set(sent.id, session);
+  saveAttendanceSession(session);
 
   // Add components (need message ID for custom IDs)
   const rows = buildAttendanceComponents(session);
@@ -589,6 +599,7 @@ async function handleSignup(
   const signup: RoleSignup = { userId, displayName };
   session.roleQueues[roleIndex].push(signup);
   session.userRoles.set(userId, roleIndex);
+  saveAttendanceSession(session);
 
   const embed = buildAttendanceEmbed(session);
   await interaction.update({ embeds: [embed] });
@@ -635,6 +646,7 @@ async function handleLeave(interaction: ButtonInteraction): Promise<void> {
   if (idx !== -1) queue.splice(idx, 1);
 
   session.userRoles.delete(userId);
+  saveAttendanceSession(session);
 
   const embed = buildAttendanceEmbed(session);
   await interaction.update({ embeds: [embed] });
@@ -669,6 +681,7 @@ async function handleClose(interaction: ButtonInteraction): Promise<void> {
   }
 
   activeSessions.delete(attendanceMsgId);
+  deleteAttendanceSession(attendanceMsgId);
 
   const totalSignups = session.userRoles.size;
   const finalEmbed = buildAttendanceEmbed(session)

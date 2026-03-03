@@ -1,6 +1,7 @@
 .env
 node_modules
 dist
+data/
 
 # OS files
 .DS_Store

@@ -10,9 +10,18 @@ import {
 } from "discord.js";
 import { LFP_MAX_PARTY_SIZE, LFP_JOIN_EMOJI, LFP_LEAVE_EMOJI } from "@/constants/lfp";
 import { LfpParty } from "@/types/lfp";
+import { saveLfpParty, deleteLfpParty, loadAllLfpParties } from "@/services/database";
 
 // Key: messageId
 const activeParties = new Map<string, LfpParty>();
+
+export function loadLfpPartiesFromDb(): void {
+  const parties = loadAllLfpParties();
+  for (const party of parties) {
+    activeParties.set(party.messageId, party);
+  }
+  console.log(`Loaded ${parties.length} LFP parties from database.`);
+}
 
 // ─── Slash Command Definition ────────────────────────────────────────────────
 
@@ -87,6 +96,7 @@ async function createParty(
 
   party.messageId = reply.id;
   activeParties.set(reply.id, party);
+  saveLfpParty(party);
 
   await reply.react(LFP_JOIN_EMOJI);
   await reply.react(LFP_LEAVE_EMOJI);
@@ -123,6 +133,7 @@ export async function handleLfpSlashCommand(
 
 async function closeParty(party: LfpParty, message: Message): Promise<void> {
   activeParties.delete(party.messageId);
+  deleteLfpParty(party.messageId);
 
   const channel = message.channel as TextChannel;
   try {
@@ -224,6 +235,7 @@ async function handleJoin(
   if (party.members.length >= party.maxSize) return;
 
   party.members.push(user.id);
+  saveLfpParty(party);
 
   const embed = buildPartyEmbed(party);
   await reaction.message.edit({ embeds: [embed] });
@@ -233,6 +245,7 @@ async function handleJoin(
     const channel = reaction.message.channel as TextChannel;
     await channel.send(`Party is ready! ${mentions}`);
     activeParties.delete(party.messageId);
+    deleteLfpParty(party.messageId);
   }
 }
 
@@ -251,6 +264,7 @@ async function handleLeave(
   if (party.members.length >= party.maxSize) return;
 
   party.members.splice(index, 1);
+  saveLfpParty(party);
 
   const embed = buildPartyEmbed(party);
   await reaction.message.edit({ embeds: [embed] });
