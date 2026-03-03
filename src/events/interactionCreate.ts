@@ -3,6 +3,7 @@ import {
   handleAttendanceInteraction,
   handleAttendanceSlashCommand,
 } from "@/commands/attendance";
+import { handleLfpSlashCommand } from "@/commands/lfp";
 
 export function registerInteractionCreateEvent(client: Client): void {
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
@@ -11,6 +12,8 @@ export function registerInteractionCreateEvent(client: Client): void {
       if (interaction.isChatInputCommand()) {
         if (interaction.commandName === "attendance") {
           await handleAttendanceSlashCommand(interaction);
+        } else if (interaction.commandName === "lfp") {
+          await handleLfpSlashCommand(interaction);
         }
         return;
       }

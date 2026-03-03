@@ -1,8 +1,10 @@
 import {
+  ChatInputCommandInteraction,
   EmbedBuilder,
   Message,
   MessageReaction,
   PermissionFlagsBits,
+  SlashCommandBuilder,
   User,
   TextChannel,
 } from "discord.js";
@@ -11,6 +13,34 @@ import { LfpParty } from "@/types/lfp";
 
 // Key: messageId
 const activeParties = new Map<string, LfpParty>();
+
+// ─── Slash Command Definition ────────────────────────────────────────────────
+
+export const lfpCommand = new SlashCommandBuilder()
+  .setName("lfp")
+  .setDescription("Create a Looking For Party embed")
+  .addIntegerOption((option) =>
+    option
+      .setName("count")
+      .setDescription("Number of extra members needed")
+      .setRequired(true)
+      .setMinValue(1)
+      .setMaxValue(LFP_MAX_PARTY_SIZE - 1),
+  )
+  .addStringOption((option) =>
+    option
+      .setName("title")
+      .setDescription("Party title (e.g. Grinding Stars End)")
+      .setRequired(false),
+  );
+
+// ─── Embed Builders ─────────────────────────────────────────────────────────
+
+function buildPartyTitle(party: LfpParty): string {
+  const base = `${party.creatorName}'s Party`;
+  const label = party.title ? `${base} — ${party.title}` : base;
+  return `${label} (${party.members.length}/${party.maxSize})`;
+}
 
 function buildPartyEmbed(party: LfpParty): EmbedBuilder {
   const isFull = party.members.length >= party.maxSize;
@@ -21,7 +51,7 @@ function buildPartyEmbed(party: LfpParty): EmbedBuilder {
   });
 
   const embed = new EmbedBuilder()
-    .setTitle(`${party.creatorName}'s Party (${party.members.length}/${party.maxSize})`)
+    .setTitle(buildPartyTitle(party))
     .setDescription(slots.join("\n"))
     .setColor(isFull ? 0x00ff00 : 0x5865f2);
 
@@ -36,13 +66,60 @@ function buildPartyEmbed(party: LfpParty): EmbedBuilder {
 
 function buildClosedEmbed(party: LfpParty): EmbedBuilder {
   const slots = party.members.map((id, i) => `${i + 1}. <@${id}>`);
+  const base = `${party.creatorName}'s Party`;
+  const label = party.title ? `${base} — ${party.title}` : base;
 
   return new EmbedBuilder()
-    .setTitle(`${party.creatorName}'s Party (Closed)`)
+    .setTitle(`${label} (Closed)`)
     .setDescription(slots.join("\n"))
     .setColor(0xed4245)
     .setFooter({ text: "This party has been closed." });
 }
+
+// ─── Shared Party Creation ──────────────────────────────────────────────────
+
+async function createParty(
+  channel: TextChannel,
+  party: LfpParty,
+): Promise<void> {
+  const embed = buildPartyEmbed(party);
+  const reply = await channel.send({ embeds: [embed] });
+
+  party.messageId = reply.id;
+  activeParties.set(reply.id, party);
+
+  await reply.react(LFP_JOIN_EMOJI);
+  await reply.react(LFP_LEAVE_EMOJI);
+}
+
+// ─── Slash Command Handler ──────────────────────────────────────────────────
+
+export async function handleLfpSlashCommand(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  if (!interaction.guild) return;
+
+  const count = interaction.options.getInteger("count", true);
+  const title = interaction.options.getString("title") ?? undefined;
+  const member = interaction.member;
+
+  const party: LfpParty = {
+    messageId: "",
+    channelId: interaction.channelId,
+    guildId: interaction.guild.id,
+    creatorId: interaction.user.id,
+    creatorName:
+      member && "displayName" in member ? member.displayName : interaction.user.username,
+    members: [interaction.user.id],
+    maxSize: count + 1,
+    title,
+  };
+
+  await interaction.reply({ content: "Party created!", ephemeral: true });
+  await createParty(interaction.channel as TextChannel, party);
+}
+
+// ─── Message Command Handler ────────────────────────────────────────────────
 
 async function closeParty(party: LfpParty, message: Message): Promise<void> {
   activeParties.delete(party.messageId);
@@ -67,11 +144,12 @@ export async function handleLfpCommand(message: Message): Promise<boolean> {
   if (!message.guild) return true;
 
   // Check if bot has permission to send messages in this channel
-  const botPermissions = message.channel.isTextBased() && "permissionsFor" in message.channel
-    ? message.channel.permissionsFor(message.guild.members.me!)
-    : null;
+  const botPermissions =
+    message.channel.isTextBased() && "permissionsFor" in message.channel
+      ? message.channel.permissionsFor(message.guild.members.me!)
+      : null;
   if (botPermissions && !botPermissions.has(PermissionFlagsBits.SendMessages)) {
-    return true; // Silently skip — can't send here
+    return true;
   }
 
   const args = message.content.split(/\s+/);
@@ -89,14 +167,17 @@ export async function handleLfpCommand(message: Message): Promise<boolean> {
     return true;
   }
 
-  const count = parseInt(args[1], 10);
+  const count = Number.parseInt(args[1], 10);
 
-  if (isNaN(count) || count < 1 || count > LFP_MAX_PARTY_SIZE - 1) {
+  if (Number.isNaN(count) || count < 1 || count > LFP_MAX_PARTY_SIZE - 1) {
     await message.reply(
-      `Usage: \`!LFP <1-${LFP_MAX_PARTY_SIZE - 1}>\` — number of extra members needed.\nUse \`!LFP close\` to close your party early.`,
+      `Usage: \`!LFP <1-${LFP_MAX_PARTY_SIZE - 1}> [title]\` — number of extra members needed.\nUse \`!LFP close\` to close your party early.`,
     );
     return true;
   }
+
+  // Everything after the number is the title
+  const title = args.slice(2).join(" ") || undefined;
 
   const party: LfpParty = {
     messageId: "",
@@ -105,21 +186,15 @@ export async function handleLfpCommand(message: Message): Promise<boolean> {
     creatorId: message.author.id,
     creatorName: message.member?.displayName ?? message.author.username,
     members: [message.author.id],
-    maxSize: count + 1, // +1 for creator
+    maxSize: count + 1,
+    title,
   };
 
-  const embed = buildPartyEmbed(party);
-  const channel = message.channel as TextChannel;
-  const reply = await channel.send({ embeds: [embed] });
-
-  party.messageId = reply.id;
-  activeParties.set(reply.id, party);
-
-  await reply.react(LFP_JOIN_EMOJI);
-  await reply.react(LFP_LEAVE_EMOJI);
-
+  await createParty(message.channel as TextChannel, party);
   return true;
 }
+
+// ─── Reaction Handlers ──────────────────────────────────────────────────────
 
 export async function handleLfpReaction(
   reaction: MessageReaction,
@@ -142,7 +217,6 @@ async function handleJoin(
   user: User,
   party: LfpParty,
 ): Promise<void> {
-  // Remove the user's reaction so it resets for next use
   await reaction.users.remove(user.id);
 
   if (user.id === party.creatorId) return;
@@ -154,7 +228,6 @@ async function handleJoin(
   const embed = buildPartyEmbed(party);
   await reaction.message.edit({ embeds: [embed] });
 
-  // Party is now full — announce
   if (party.members.length >= party.maxSize) {
     const mentions = party.members.map((id) => `<@${id}>`).join(" ");
     const channel = reaction.message.channel as TextChannel;
@@ -168,17 +241,13 @@ async function handleLeave(
   user: User,
   party: LfpParty,
 ): Promise<void> {
-  // Remove the user's reaction so it resets for next use
   await reaction.users.remove(user.id);
 
-  // Creator cannot leave their own party
   if (user.id === party.creatorId) return;
 
-  // Only remove if they're actually in the party
   const index = party.members.indexOf(user.id);
   if (index === -1) return;
 
-  // Party is already full (locked in)
   if (party.members.length >= party.maxSize) return;
 
   party.members.splice(index, 1);

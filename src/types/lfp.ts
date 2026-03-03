@@ -6,4 +6,5 @@ export interface LfpParty {
   creatorName: string;
   members: string[]; // user IDs (includes creator)
   maxSize: number;
+  title?: string;
 }
