@@ -11,6 +11,13 @@ export const ATTENDANCE_ROLES = [
   { name: "Flex", emoji: "\uD83D\uDD00" }, // 🔀
 ] as const;
 
+/** Attendance roles that require a matching Discord server role to sign up.
+ *  Key = lowercase attendance role name, Value = substring to match in Discord role name. */
+export const ATTENDANCE_ROLE_REQUIREMENTS: Record<string, string> = {
+  "def team": "def",
+  "shotcaller": "shotcaller",
+};
+
 // Custom ID prefixes for interaction routing (scoped by message ID for concurrency)
 export const ATT_ID = {
   SETUP_ROLE: "att_setup_role",
@@ -23,4 +30,6 @@ export const ATT_ID = {
   SIGNUP: "att_signup",
   LEAVE: "att_leave",
   CLOSE: "att_close",
+  EDIT_ROSTER: "att_edit_roster",
+  MODAL_EDIT_ROSTER: "att_modal_edit_roster",
 } as const;

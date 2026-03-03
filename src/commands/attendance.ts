@@ -23,6 +23,7 @@ import {
   ATTENDANCE_ROLES,
   ATTENDANCE_MIN_SLOTS,
   ATTENDANCE_MAX_SLOTS,
+  ATTENDANCE_ROLE_REQUIREMENTS,
   ATT_ID,
 } from "@/constants/attendance";
 import type {
@@ -159,6 +160,14 @@ export async function handleAttendanceInteraction(
   }
   if (id.startsWith(ATT_ID.CLOSE + ":")) {
     await handleClose(interaction as ButtonInteraction);
+    return true;
+  }
+  if (id.startsWith(ATT_ID.EDIT_ROSTER + ":")) {
+    await handleEditRosterButton(interaction as ButtonInteraction);
+    return true;
+  }
+  if (id.startsWith(ATT_ID.MODAL_EDIT_ROSTER + ":")) {
+    await handleEditRosterModal(interaction as ModalSubmitInteraction);
     return true;
   }
 
@@ -455,9 +464,6 @@ async function handleSetupConfirm(
     return;
   }
 
-  // Filter out roles with 0 slots
-  const activeRoles = setup.roles.filter((r) => r.maxCount > 0);
-
   const session: AttendanceSession = {
     messageId: "",
     channelId: setup.channelId,
@@ -465,9 +471,9 @@ async function handleSetupConfirm(
     creatorId: setup.creatorId,
     totalSlots: setup.totalSlots,
     title: setup.title,
-    roles: activeRoles,
+    roles: setup.roles,
     pingRoleId: setup.pingRoleId,
-    roleQueues: activeRoles.map(() => []),
+    roleQueues: setup.roles.map(() => []),
     userRoles: new Map(),
   };
 
@@ -569,6 +575,17 @@ async function handleSignup(
   if (!role) {
     await interaction.reply({
       content: "Invalid role selection.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Role restriction check
+  const member = interaction.member;
+  if (member instanceof GuildMember && !hasRequiredDiscordRole(member, role.name)) {
+    const reqSubstring = ATTENDANCE_ROLE_REQUIREMENTS[role.name.toLowerCase()];
+    await interaction.reply({
+      content: `You need a Discord role containing **"${reqSubstring}"** to sign up as **${role.name}**.`,
       ephemeral: true,
     });
     return;
@@ -683,7 +700,7 @@ async function handleClose(interaction: ButtonInteraction): Promise<void> {
   activeSessions.delete(attendanceMsgId);
   deleteAttendanceSession(attendanceMsgId);
 
-  const totalSignups = session.userRoles.size;
+  const totalSignups = getConfirmedCount(session);
   const finalEmbed = buildAttendanceEmbed(session)
     .setTitle(
       `${session.title} (Closed) — ${totalSignups}/${session.totalSlots}`
@@ -692,6 +709,192 @@ async function handleClose(interaction: ButtonInteraction): Promise<void> {
     .setFooter({ text: "This attendance session has been closed." });
 
   await interaction.update({ embeds: [finalEmbed], components: [] });
+}
+
+// ─── Attendance: Edit Roster Button → Modal ─────────────────────────────────
+
+// Tracks which sessions need a Part 2 edit (for >5 active roles)
+const editRosterPendingPart2 = new Set<string>();
+
+async function handleEditRosterButton(
+  interaction: ButtonInteraction
+): Promise<void> {
+  const parts = interaction.customId.split(":");
+  const attendanceMsgId = parts[1];
+
+  const session = activeSessions.get(attendanceMsgId);
+  if (!session) {
+    await interaction.reply({
+      content: "This attendance session has expired.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const member = interaction.member;
+  if (
+    !member ||
+    !(member instanceof GuildMember) ||
+    !member.permissions.has(PermissionFlagsBits.Administrator)
+  ) {
+    await interaction.reply({
+      content: "Only administrators can edit the roster.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const roleCount = session.roles.length;
+  const needsTwoParts = roleCount > 5;
+
+  // Determine which phase to show
+  let phase: number;
+  let startIdx: number;
+  let endIdx: number;
+
+  if (!needsTwoParts) {
+    phase = -1; // single modal
+    startIdx = 0;
+    endIdx = roleCount;
+  } else if (editRosterPendingPart2.has(attendanceMsgId)) {
+    phase = 1; // Part 2
+    startIdx = 5;
+    endIdx = roleCount;
+  } else {
+    phase = 0; // Part 1
+    startIdx = 0;
+    endIdx = 5;
+  }
+
+  const currentTotal = session.roles.reduce((sum, r) => sum + r.maxCount, 0);
+  const remaining = session.totalSlots - currentTotal;
+
+  const titleBase = phase === 0
+    ? "Edit Roster (1/2)"
+    : phase === 1
+      ? "Edit Roster (2/2)"
+      : "Edit Roster";
+  const title = `${titleBase} — ${remaining} remaining`;
+
+  const modal = new ModalBuilder()
+    .setCustomId(`${ATT_ID.MODAL_EDIT_ROSTER}:${attendanceMsgId}:${phase}`)
+    .setTitle(title);
+
+  for (let i = startIdx; i < endIdx; i++) {
+    const role = session.roles[i];
+    const input = new TextInputBuilder()
+      .setCustomId(`role_${i}`)
+      .setLabel(`${role.emoji} ${role.name} (currently ${role.maxCount})`)
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("0")
+      .setValue(role.maxCount.toString())
+      .setRequired(true)
+      .setMinLength(1)
+      .setMaxLength(3);
+
+    modal.addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(input)
+    );
+  }
+
+  await interaction.showModal(modal);
+}
+
+// ─── Attendance: Edit Roster Modal Submit ───────────────────────────────────
+
+async function handleEditRosterModal(
+  interaction: ModalSubmitInteraction
+): Promise<void> {
+  const parts = interaction.customId.split(":");
+  const attendanceMsgId = parts[1];
+  const phase = Number.parseInt(parts[2], 10); // -1 = single, 0 = part 1, 1 = part 2
+
+  const session = activeSessions.get(attendanceMsgId);
+  if (!session) {
+    await interaction.reply({
+      content: "This attendance session has expired.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const roleCount = session.roles.length;
+
+  const startIdx = phase === 1 ? 5 : 0;
+  const endIdx = phase === 0 ? 5 : roleCount;
+
+  // Parse and validate inputs
+  const counts: number[] = [];
+  const errors: string[] = [];
+
+  for (let i = startIdx; i < endIdx; i++) {
+    const raw = interaction.fields.getTextInputValue(`role_${i}`).trim();
+
+    if (!/^\d+$/.test(raw)) {
+      errors.push(`**${session.roles[i].name}**: "${raw}" — only whole numbers are allowed.`);
+      continue;
+    }
+
+    counts.push(Number.parseInt(raw, 10));
+  }
+
+  if (errors.length > 0) {
+    await interaction.reply({
+      content: `Invalid input:\n${errors.join("\n")}`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (phase === 0) {
+    // Part 1 submitted — save counts, prompt admin to click Edit Roster again
+    for (let i = startIdx; i < endIdx; i++) {
+      session.roles[i].maxCount = counts[i - startIdx];
+    }
+    editRosterPendingPart2.add(attendanceMsgId);
+
+    await interaction.deferUpdate();
+    await interaction.followUp({
+      content: "Part 1 saved. Click **Edit Roster** again to configure the remaining roles.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Final validation: total must equal session.totalSlots
+  const otherRolesTotal = session.roles.reduce((sum, r, i) => {
+    if (i >= startIdx && i < endIdx) return sum;
+    return sum + r.maxCount;
+  }, 0);
+  const theseRolesTotal = counts.reduce((sum, c) => sum + c, 0);
+  const newTotal = otherRolesTotal + theseRolesTotal;
+
+  if (newTotal !== session.totalSlots) {
+    await interaction.reply({
+      content: `Total slots must equal **${session.totalSlots}**. Your new counts add up to **${newTotal}**.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Apply the counts
+  for (let i = startIdx; i < endIdx; i++) {
+    session.roles[i].maxCount = counts[i - startIdx];
+  }
+
+  editRosterPendingPart2.delete(attendanceMsgId);
+  saveAttendanceSession(session);
+
+  // Update the attendance embed and components
+  await interaction.deferUpdate();
+
+  const channel = interaction.channel;
+  if (!channel) return;
+
+  const attendanceMessage = await channel.messages.fetch(attendanceMsgId);
+  const embed = buildAttendanceEmbed(session);
+  const components = buildAttendanceComponents(session);
+  await attendanceMessage.edit({ embeds: [embed], components });
 }
 
 // ─── Embed Builders ─────────────────────────────────────────────────────────
@@ -728,11 +931,24 @@ function buildSetupEmbed(setup: AttendanceSetup): EmbedBuilder {
     .setColor(assignedSlots === setup.totalSlots ? 0x00ff00 : 0xffa500);
 }
 
-function buildAttendanceEmbed(session: AttendanceSession): EmbedBuilder {
-  const totalSignups = session.userRoles.size;
+function getConfirmedCount(session: AttendanceSession): number {
+  return session.roleQueues.reduce(
+    (sum, queue, i) => sum + Math.min(queue.length, session.roles[i].maxCount),
+    0
+  );
+}
 
-  const fields = session.roles.map((role, roleIndex) => {
+function buildAttendanceEmbed(session: AttendanceSession): EmbedBuilder {
+  const totalSignups = getConfirmedCount(session);
+
+  const fields: { name: string; value: string; inline: boolean }[] = [];
+  for (let roleIndex = 0; roleIndex < session.roles.length; roleIndex++) {
+    const role = session.roles[roleIndex];
     const queue = session.roleQueues[roleIndex];
+
+    // Skip roles with 0 slots and no users queued
+    if (role.maxCount === 0 && queue.length === 0) continue;
+
     const confirmed = Math.min(queue.length, role.maxCount);
 
     let memberList: string;
@@ -742,7 +958,6 @@ function buildAttendanceEmbed(session: AttendanceSession): EmbedBuilder {
       memberList = queue
         .map((signup, i) => {
           const num = i + 1;
-          // Confirmed slots: normal text; waitlisted: strikethrough
           if (i < role.maxCount) {
             return `${num}. ${signup.displayName}`;
           }
@@ -751,12 +966,12 @@ function buildAttendanceEmbed(session: AttendanceSession): EmbedBuilder {
         .join("\n");
     }
 
-    return {
+    fields.push({
       name: `${role.emoji} ${role.name} (${confirmed}/${role.maxCount})`,
       value: memberList,
       inline: true,
-    };
-  });
+    });
+  }
 
   const embed = new EmbedBuilder()
     .setTitle(`${session.title} — ${totalSignups}/${session.totalSlots}`)
@@ -819,12 +1034,17 @@ function buildSetupComponents(
 function buildAttendanceComponents(
   session: AttendanceSession
 ): ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] {
-  const options = session.roles.map((role, i) =>
-    new StringSelectMenuOptionBuilder()
-      .setLabel(role.name)
-      .setValue(i.toString())
-      .setDescription(`${role.emoji} ${role.maxCount} slots`)
-  );
+  const options: StringSelectMenuOptionBuilder[] = [];
+  for (let i = 0; i < session.roles.length; i++) {
+    const role = session.roles[i];
+    if (role.maxCount === 0) continue;
+    options.push(
+      new StringSelectMenuOptionBuilder()
+        .setLabel(role.name)
+        .setValue(i.toString())
+        .setDescription(`${role.emoji} ${role.maxCount} slots`)
+    );
+  }
 
   const selectRow =
     new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -842,6 +1062,10 @@ function buildAttendanceComponents(
       .setLabel("Leave")
       .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
+      .setCustomId(`${ATT_ID.EDIT_ROSTER}:${session.messageId}`)
+      .setLabel("Edit Roster")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
       .setCustomId(`${ATT_ID.CLOSE}:${session.messageId}`)
       .setLabel("Close")
       .setStyle(ButtonStyle.Secondary)
@@ -851,6 +1075,18 @@ function buildAttendanceComponents(
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+function hasRequiredDiscordRole(
+  member: GuildMember,
+  attendanceRoleName: string
+): boolean {
+  const requiredSubstring =
+    ATTENDANCE_ROLE_REQUIREMENTS[attendanceRoleName.toLowerCase()];
+  if (!requiredSubstring) return true;
+  return member.roles.cache.some((role) =>
+    role.name.toLowerCase().includes(requiredSubstring)
+  );
+}
 
 function getDisplayName(interaction: Interaction): string {
   if (interaction.member instanceof GuildMember) {
