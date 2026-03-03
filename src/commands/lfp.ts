@@ -40,7 +40,7 @@ export const lfpCommand = new SlashCommandBuilder()
     option
       .setName("title")
       .setDescription("Party title (e.g. Grinding Stars End)")
-      .setRequired(false),
+      .setRequired(true),
   );
 
 // ─── Embed Builders ─────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ export async function handleLfpSlashCommand(
   if (!interaction.guild) return;
 
   const count = interaction.options.getInteger("count", true);
-  const title = interaction.options.getString("title") ?? undefined;
+  const title = interaction.options.getString("title", true);
   const member = interaction.member;
 
   const party: LfpParty = {
@@ -182,13 +182,20 @@ export async function handleLfpCommand(message: Message): Promise<boolean> {
 
   if (Number.isNaN(count) || count < 1 || count > LFP_MAX_PARTY_SIZE - 1) {
     await message.reply(
-      `Usage: \`!LFP <1-${LFP_MAX_PARTY_SIZE - 1}> [title]\` — number of extra members needed.\nUse \`!LFP close\` to close your party early.`,
+      `Invalid count. Must be between **1** and **${LFP_MAX_PARTY_SIZE - 1}**.\nUsage: \`!LFP <count> <title>\`\nExample: \`!LFP 3 Grinding Stars End\`\nUse \`!LFP close\` to close your party early.`,
     );
     return true;
   }
 
-  // Everything after the number is the title
-  const title = args.slice(2).join(" ") || undefined;
+  // Everything after the number is the title (required)
+  const title = args.slice(2).join(" ");
+
+  if (!title) {
+    await message.reply(
+      `Please provide a title for your party.\nUsage: \`!LFP <count> <title>\`\nExample: \`!LFP 3 Grinding Stars End\``,
+    );
+    return true;
+  }
 
   const party: LfpParty = {
     messageId: "",
