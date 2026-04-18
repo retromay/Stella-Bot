@@ -10,7 +10,7 @@ type TriggerResponse =
 
 const TRIGGERS: Record<string, TriggerResponse> = {
   anjing: { type: "file", path: assets.bonkExplosion },
-  anomali: { type: "text", content: "yoshirawa" },
+  babi: { type: "file", path: assets.weChatPig },
 };
 
 export function registerMessageCreateEvent(client: Client): void {
