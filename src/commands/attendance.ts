@@ -1470,7 +1470,7 @@ function buildDetailsPanel(
 
   const categorySelect = new StringSelectMenuBuilder()
     .setCustomId(`${ATT_ID.CATEGORY}:${msgId}`)
-    .setPlaceholder("What are you playing? (Tank / Melee / Mage / Range)")
+    .setPlaceholder("What are you playing? (Tank / Melee / Mage / Range / Healer)")
     .addOptions(
       PLAYER_CATEGORIES.map((c) =>
         new StringSelectMenuOptionBuilder()

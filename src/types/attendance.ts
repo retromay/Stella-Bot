@@ -4,7 +4,7 @@ export interface AttendanceRole {
   maxCount: number;
 }
 
-export type PlayerCategory = "tank" | "melee" | "mage" | "range";
+export type PlayerCategory = "tank" | "melee" | "mage" | "range" | "healer";
 export type DefDuty = "hwacha" | "ft" | "cannon";
 
 export interface AttendanceSetup {

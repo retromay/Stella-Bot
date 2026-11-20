@@ -5,7 +5,7 @@ export const ATTENDANCE_ROLES = [
   { name: "Mainball", emoji: "⚔️" }, // ⚔️
   { name: "Shotcaller", emoji: "📢" }, // 📢
   { name: "Shai", emoji: "💚" }, // 💚
-  { name: "Def Team", emoji: "🛡️" }, // 🛡️
+  { name: "Def Team", emoji: "🏰" }, // 🏰
   { name: "ELE", emoji: "🐘" }, // 🐘
   { name: "Flex", emoji: "🔀" }, // 🔀
 ] as const;
@@ -19,6 +19,7 @@ export const PLAYER_CATEGORIES = [
   { key: "melee", name: "Melee", emoji: "🗡️" }, // 🗡️
   { key: "mage", name: "Mage", emoji: "🔮" }, // 🔮
   { key: "range", name: "Range", emoji: "🏹" }, // 🏹
+  { key: "healer", name: "Healer", emoji: "💚" }, // 💚
 ] as const;
 
 /** Def Team duties — informational only, no limits. */
