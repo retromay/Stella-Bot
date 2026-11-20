@@ -12,6 +12,7 @@ import {
   ModalSubmitInteraction,
   RoleSelectMenuBuilder,
   RoleSelectMenuInteraction,
+  SendableChannels,
   SlashCommandBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
@@ -23,18 +24,37 @@ import {
   ATTENDANCE_ROLES,
   ATTENDANCE_MIN_SLOTS,
   ATTENDANCE_MAX_SLOTS,
-  ATTENDANCE_ROLE_REQUIREMENTS,
   ATT_ID,
+  BDO_CLASSES,
+  CLASS_SELECT_SPLIT,
+  DEF_DUTIES,
+  DEF_TEAM_ROLE_NAME,
+  PLAYER_CATEGORIES,
+  UNSET_EMOJI,
 } from "@/constants/attendance";
 import type {
+  AttendanceRole,
   AttendanceSetup,
   AttendanceSession,
+  DefDuty,
+  PlayerCategory,
+  PlayerProfile,
   RoleSignup,
 } from "@/types/attendance";
-import { saveAttendanceSession, deleteAttendanceSession, loadAllAttendanceSessions } from "@/services/database";
+import {
+  saveAttendanceSession,
+  deleteAttendanceSession,
+  loadAllAttendanceSessions,
+  getPlayerProfile,
+  savePlayerProfile,
+  saveAttendanceTemplate,
+  writeAttendanceHistory,
+} from "@/services/database";
+import { findTemplate } from "@/commands/attendanceTemplate";
 
-// Discord modals support max 5 text inputs — split 7 roles into 5 + 2
-const MODAL_PHASE_0_COUNT = 5;
+// Discord modals support max 5 text inputs — split roles into parts of 5
+const ROLES_PER_MODAL = 5;
+const FIELD_VALUE_LIMIT = 1024;
 
 // In-memory storage keyed by message ID
 const activeSetups = new Map<string, AttendanceSetup>();
@@ -53,11 +73,16 @@ export function loadAttendanceSessionsFromDb(): void {
 export const attendanceCommand = new SlashCommandBuilder()
   .setName("attendance")
   .setDescription("Create an attendance session")
+  .addStringOption((option) =>
+    option
+      .setName("template")
+      .setDescription("Post instantly from a template (e.g. T2 50-man)")
+      .setAutocomplete(true)
+  )
   .addIntegerOption((option) =>
     option
       .setName("slots")
-      .setDescription("Total number of attendance slots")
-      .setRequired(true)
+      .setDescription("Total number of attendance slots (manual setup)")
       .setMinValue(ATTENDANCE_MIN_SLOTS)
       .setMaxValue(ATTENDANCE_MAX_SLOTS)
   )
@@ -70,7 +95,20 @@ export async function handleAttendanceSlashCommand(
 ): Promise<void> {
   if (!interaction.guild) return;
 
-  const count = interaction.options.getInteger("slots", true);
+  const templateName = interaction.options.getString("template");
+  if (templateName) {
+    await postFromTemplate(interaction, templateName);
+    return;
+  }
+
+  const count = interaction.options.getInteger("slots");
+  if (count === null) {
+    await interaction.reply({
+      content: "Pick a `template` to post instantly, or give `slots` for manual setup.",
+      ephemeral: true,
+    });
+    return;
+  }
 
   const setup: AttendanceSetup = {
     messageId: "",
@@ -99,6 +137,53 @@ export async function handleAttendanceSlashCommand(
   // Edit to add components with the correct message-scoped custom IDs
   const rows = buildSetupComponents(setup);
   await interaction.editReply({ embeds: [embed], components: rows });
+}
+
+async function postFromTemplate(
+  interaction: ChatInputCommandInteraction,
+  templateName: string
+): Promise<void> {
+  if (!interaction.guild) return;
+
+  const template = findTemplate(interaction.guild.id, templateName);
+  if (!template) {
+    await interaction.reply({
+      content: `No template named **${templateName}**. See \`/attendance-template list\`.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const channel = interaction.channel;
+  if (!channel?.isSendable()) {
+    await interaction.reply({
+      content: "I can't post in this channel.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const roles = template.roles.map((r) => ({ ...r }));
+  const totalSlots = roles.reduce((sum, r) => sum + r.maxCount, 0);
+
+  const session: AttendanceSession = {
+    messageId: "",
+    channelId: interaction.channelId,
+    guildId: interaction.guild.id,
+    creatorId: interaction.user.id,
+    totalSlots,
+    title: template.title,
+    roles,
+    pingRoleId: template.pingRoleId,
+    roleQueues: roles.map(() => []),
+    userRoles: new Map(),
+  };
+
+  await interaction.reply({
+    content: `Posting **${template.name}** (${totalSlots} slots).`,
+    ephemeral: true,
+  });
+  await postAttendanceSession(channel, session);
 }
 
 // ─── Interaction Dispatcher ──────────────────────────────────────────────────
@@ -130,6 +215,10 @@ export async function handleAttendanceInteraction(
     await handleSetupPingSelect(interaction as RoleSelectMenuInteraction);
     return true;
   }
+  if (id.startsWith(ATT_ID.SETUP_SAVE_TPL + ":")) {
+    await handleSetupSaveTemplateButton(interaction as ButtonInteraction);
+    return true;
+  }
   if (id.startsWith(ATT_ID.SETUP_CONFIRM + ":")) {
     await handleSetupConfirm(interaction as ButtonInteraction);
     return true;
@@ -146,6 +235,10 @@ export async function handleAttendanceInteraction(
   }
   if (id.startsWith(ATT_ID.MODAL_TITLE + ":")) {
     await handleTitleModalSubmit(interaction as ModalSubmitInteraction);
+    return true;
+  }
+  if (id.startsWith(ATT_ID.MODAL_SAVE_TPL + ":")) {
+    await handleSaveTemplateModal(interaction as ModalSubmitInteraction);
     return true;
   }
 
@@ -168,6 +261,21 @@ export async function handleAttendanceInteraction(
   }
   if (id.startsWith(ATT_ID.MODAL_EDIT_ROSTER + ":")) {
     await handleEditRosterModal(interaction as ModalSubmitInteraction);
+    return true;
+  }
+
+  // Player details (category / class / def duty)
+  if (id.startsWith(ATT_ID.DETAILS + ":")) {
+    await handleDetailsButton(interaction as ButtonInteraction);
+    return true;
+  }
+  if (
+    id.startsWith(ATT_ID.CATEGORY + ":") ||
+    id.startsWith(ATT_ID.CLASS_A + ":") ||
+    id.startsWith(ATT_ID.CLASS_B + ":") ||
+    id.startsWith(ATT_ID.DUTY + ":")
+  ) {
+    await handleDetailsSelect(interaction as StringSelectMenuInteraction);
     return true;
   }
 
@@ -200,9 +308,8 @@ async function handleSetupRoleButton(
   }
 
   const phase = setup.setupPhase;
-  const startIdx = phase === 0 ? 0 : MODAL_PHASE_0_COUNT;
-  const endIdx =
-    phase === 0 ? MODAL_PHASE_0_COUNT : ATTENDANCE_ROLES.length;
+  const partCount = getModalPartCount(setup.roles.length);
+  const [startIdx, endIdx] = getModalPartRange(phase, setup.roles.length);
   const phaseRoles = setup.roles.slice(startIdx, endIdx);
 
   const remaining =
@@ -212,9 +319,9 @@ async function handleSetupRoleButton(
   const modal = new ModalBuilder()
     .setCustomId(`${ATT_ID.MODAL_ROLE}:${setupMsgId}:${phase}`)
     .setTitle(
-      phase === 0
-        ? `Set Role Counts (Part 1/2)`
-        : `Set Role Counts (Part 2/2)`
+      partCount > 1
+        ? `Set Role Counts (Part ${phase + 1}/${partCount})`
+        : "Set Role Counts"
     );
 
   for (let i = 0; i < phaseRoles.length; i++) {
@@ -300,9 +407,7 @@ async function handleRoleModalSubmit(
     return;
   }
 
-  const startIdx = phase === 0 ? 0 : MODAL_PHASE_0_COUNT;
-  const endIdx =
-    phase === 0 ? MODAL_PHASE_0_COUNT : ATTENDANCE_ROLES.length;
+  const [startIdx, endIdx] = getModalPartRange(phase, setup.roles.length);
 
   // Parse and validate all inputs from this modal
   const counts: number[] = [];
@@ -349,12 +454,8 @@ async function handleRoleModalSubmit(
     setup.roles[i].maxCount = counts[i - startIdx];
   }
 
-  // Advance to next phase (or wrap back to 0 for re-editing)
-  if (phase === 0) {
-    setup.setupPhase = 1;
-  } else {
-    setup.setupPhase = 0; // allow re-editing from the start
-  }
+  // Advance to next part (or wrap back to 0 for re-editing)
+  setup.setupPhase = (phase + 1) % getModalPartCount(setup.roles.length);
 
   // Acknowledge and update the setup message
   await interaction.deferUpdate();
@@ -429,6 +530,98 @@ async function handleSetupPingSelect(
   await interaction.update({ embeds: [embed] });
 }
 
+// ─── Setup: Save as Template Button → Modal ─────────────────────────────────
+
+async function handleSetupSaveTemplateButton(
+  interaction: ButtonInteraction
+): Promise<void> {
+  const parts = interaction.customId.split(":");
+  const setupMsgId = parts[1];
+
+  const setup = activeSetups.get(setupMsgId);
+  if (!setup) {
+    await interaction.reply({
+      content: "This setup session has expired.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (interaction.user.id !== setup.creatorId) {
+    await interaction.reply({
+      content: "Only the creator can save this as a template.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const assignedSlots = setup.roles.reduce((sum, r) => sum + r.maxCount, 0);
+  if (assignedSlots !== setup.totalSlots) {
+    await interaction.reply({
+      content: `Set role counts that add up to **${setup.totalSlots}** before saving. Currently: **${assignedSlots}**.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`${ATT_ID.MODAL_SAVE_TPL}:${setupMsgId}`)
+    .setTitle("Save as Template");
+
+  const input = new TextInputBuilder()
+    .setCustomId("template_name")
+    .setLabel("Template name (same name overwrites)")
+    .setStyle(TextInputStyle.Short)
+    .setValue(setup.title.slice(0, 50))
+    .setRequired(true)
+    .setMinLength(1)
+    .setMaxLength(50);
+
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(input)
+  );
+
+  await interaction.showModal(modal);
+}
+
+async function handleSaveTemplateModal(
+  interaction: ModalSubmitInteraction
+): Promise<void> {
+  const parts = interaction.customId.split(":");
+  const setupMsgId = parts[1];
+
+  const setup = activeSetups.get(setupMsgId);
+  if (!setup) {
+    await interaction.reply({
+      content: "This setup session has expired.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const name = interaction.fields.getTextInputValue("template_name").trim();
+  if (!name) {
+    await interaction.reply({
+      content: "Template name can't be empty.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  saveAttendanceTemplate(setup.guildId, interaction.user.id, {
+    name,
+    title: setup.title,
+    roles: setup.roles.map((r) => ({ ...r })),
+    pingRoleId: setup.pingRoleId,
+    builtIn: false,
+  });
+
+  await interaction.reply({
+    content: `Saved template **${name}**. Post it anytime with \`/attendance template:${name}\`.`,
+    ephemeral: true,
+  });
+}
+
 // ─── Setup: Confirm ─────────────────────────────────────────────────────────
 
 async function handleSetupConfirm(
@@ -490,30 +683,9 @@ async function handleSetupConfirm(
     components: [],
   });
 
-  // Post the attendance embed
   const channel = interaction.channel;
-  if (!channel || !("send" in channel)) return;
-  const pingContent = setup.pingRoleId
-    ? `<@&${setup.pingRoleId}>`
-    : undefined;
-
-  const embed = buildAttendanceEmbed(session);
-  const sent = await channel.send({
-    content: pingContent,
-    embeds: [embed],
-  });
-
-  session.messageId = sent.id;
-  activeSessions.set(sent.id, session);
-  saveAttendanceSession(session);
-
-  // Add components (need message ID for custom IDs)
-  const rows = buildAttendanceComponents(session);
-  await sent.edit({
-    content: pingContent,
-    embeds: [embed],
-    components: rows,
-  });
+  if (!channel?.isSendable()) return;
+  await postAttendanceSession(channel, session);
 }
 
 // ─── Setup: Cancel ──────────────────────────────────────────────────────────
@@ -553,6 +725,35 @@ async function handleSetupCancel(
   });
 }
 
+// ─── Post Attendance Session ────────────────────────────────────────────────
+
+async function postAttendanceSession(
+  channel: SendableChannels,
+  session: AttendanceSession
+): Promise<void> {
+  const pingContent = session.pingRoleId
+    ? `<@&${session.pingRoleId}>`
+    : undefined;
+
+  const embed = buildAttendanceEmbed(session);
+  const sent = await channel.send({
+    content: pingContent,
+    embeds: [embed],
+  });
+
+  session.messageId = sent.id;
+  activeSessions.set(sent.id, session);
+  saveAttendanceSession(session);
+
+  // Add components (need message ID for custom IDs)
+  const rows = buildAttendanceComponents(session);
+  await sent.edit({
+    content: pingContent,
+    embeds: [embed],
+    components: rows,
+  });
+}
+
 // ─── Attendance: Signup (Dropdown) ──────────────────────────────────────────
 
 async function handleSignup(
@@ -580,17 +781,6 @@ async function handleSignup(
     return;
   }
 
-  // Role restriction check
-  const member = interaction.member;
-  if (member instanceof GuildMember && !hasRequiredDiscordRole(member, role.name)) {
-    const reqSubstring = ATTENDANCE_ROLE_REQUIREMENTS[role.name.toLowerCase()];
-    await interaction.reply({
-      content: `You need a Discord role containing **"${reqSubstring}"** to sign up as **${role.name}**.`,
-      ephemeral: true,
-    });
-    return;
-  }
-
   const userId = interaction.user.id;
   const displayName = getDisplayName(interaction);
 
@@ -599,21 +789,33 @@ async function handleSignup(
   // Already in the same role
   if (existingRoleIndex === roleIndex) {
     await interaction.reply({
-      content: `You are already signed up as **${role.name}**.`,
+      content: `You are already signed up as **${role.name}**. Use **My Details** to change your class or duty.`,
       ephemeral: true,
     });
     return;
   }
 
-  // Remove from previous role if switching
+  // Remove from previous role if switching (keep their details)
+  let previous: RoleSignup | undefined;
   if (existingRoleIndex !== undefined) {
     const oldQueue = session.roleQueues[existingRoleIndex];
     const idx = oldQueue.findIndex((s) => s.userId === userId);
-    if (idx !== -1) oldQueue.splice(idx, 1);
+    if (idx !== -1) previous = oldQueue.splice(idx, 1)[0];
+  }
+
+  // Fill details from this session first, then from the remembered profile
+  const profile = getPlayerProfile(session.guildId, userId);
+  const signup: RoleSignup = {
+    userId,
+    displayName,
+    category: previous?.category ?? profile?.category ?? undefined,
+    className: previous?.className ?? profile?.className ?? undefined,
+  };
+  if (isDefRole(role)) {
+    signup.duty = previous?.duty ?? profile?.defDuty ?? undefined;
   }
 
   // Add to new role's queue
-  const signup: RoleSignup = { userId, displayName };
   session.roleQueues[roleIndex].push(signup);
   session.userRoles.set(userId, roleIndex);
   saveAttendanceSession(session);
@@ -621,14 +823,120 @@ async function handleSignup(
   const embed = buildAttendanceEmbed(session);
   await interaction.update({ embeds: [embed] });
 
-  // Notify about role switch
+  const notes: string[] = [];
   if (existingRoleIndex !== undefined) {
     const oldRoleName = session.roles[existingRoleIndex].name;
+    notes.push(`You switched from **${oldRoleName}** to **${role.name}**.`);
+  }
+
+  // Only ask for details that are still missing — returning players are done in one click
+  if (needsDetails(signup, role)) {
+    const panel = buildDetailsPanel(session, signup, roleIndex);
     await interaction.followUp({
-      content: `You switched from **${oldRoleName}** to **${role.name}**.`,
+      content: [...notes, panel.content].join("\n\n"),
+      components: panel.components,
+      ephemeral: true,
+    });
+  } else if (notes.length > 0) {
+    await interaction.followUp({
+      content: notes.join("\n"),
       ephemeral: true,
     });
   }
+}
+
+// ─── Attendance: My Details Button → Ephemeral Panel ────────────────────────
+
+async function handleDetailsButton(
+  interaction: ButtonInteraction
+): Promise<void> {
+  const parts = interaction.customId.split(":");
+  const attendanceMsgId = parts[1];
+
+  const session = activeSessions.get(attendanceMsgId);
+  if (!session) {
+    await interaction.reply({
+      content: "This attendance session has expired.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const found = findSignup(session, interaction.user.id);
+  if (!found) {
+    await interaction.reply({
+      content: "Sign up for a role first, then set your details.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const panel = buildDetailsPanel(session, found.signup, found.roleIndex);
+  await interaction.reply({ ...panel, ephemeral: true });
+}
+
+// ─── Attendance: Category / Class / Duty Selects ────────────────────────────
+
+async function handleDetailsSelect(
+  interaction: StringSelectMenuInteraction
+): Promise<void> {
+  const parts = interaction.customId.split(":");
+  const prefix = parts[0];
+  const attendanceMsgId = parts[1];
+
+  const session = activeSessions.get(attendanceMsgId);
+  if (!session) {
+    await interaction.update({
+      content: "This attendance session has expired.",
+      components: [],
+    });
+    return;
+  }
+
+  const found = findSignup(session, interaction.user.id);
+  if (!found) {
+    await interaction.update({
+      content: "You are no longer signed up for this attendance.",
+      components: [],
+    });
+    return;
+  }
+
+  const { signup, roleIndex } = found;
+  const value = interaction.values[0];
+  const profilePatch: Partial<PlayerProfile> = {};
+
+  if (prefix === ATT_ID.CATEGORY) {
+    if (!PLAYER_CATEGORIES.some((c) => c.key === value)) return;
+    signup.category = value as PlayerCategory;
+    profilePatch.category = signup.category;
+  } else if (prefix === ATT_ID.DUTY) {
+    if (value !== "none" && !DEF_DUTIES.some((d) => d.key === value)) return;
+    signup.duty = value === "none" ? undefined : (value as DefDuty);
+    profilePatch.defDuty = signup.duty ?? null;
+  } else {
+    if (!(BDO_CLASSES as readonly string[]).includes(value)) return;
+    signup.className = value;
+    profilePatch.className = signup.className;
+  }
+
+  saveAttendanceSession(session);
+
+  // Remember for next time
+  const current = getPlayerProfile(session.guildId, signup.userId) ?? {
+    category: null,
+    className: null,
+    defDuty: null,
+  };
+  savePlayerProfile(session.guildId, signup.userId, { ...current, ...profilePatch });
+
+  await interaction.update(buildDetailsPanel(session, signup, roleIndex));
+
+  // Refresh the public attendance embed
+  const channel = interaction.channel;
+  if (!channel) return;
+  const attendanceMessage = await channel.messages.fetch(attendanceMsgId);
+  await attendanceMessage.edit({ embeds: [buildAttendanceEmbed(session)] });
 }
 
 // ─── Attendance: Leave ──────────────────────────────────────────────────────
@@ -695,6 +1003,13 @@ async function handleClose(interaction: ButtonInteraction): Promise<void> {
       ephemeral: true,
     });
     return;
+  }
+
+  // History is a nice-to-have — never block closing on it
+  try {
+    writeAttendanceHistory(session, Date.now());
+  } catch (error) {
+    console.error("[Attendance History Error]", error);
   }
 
   activeSessions.delete(attendanceMsgId);
@@ -905,8 +1220,8 @@ function buildSetupEmbed(setup: AttendanceSetup): EmbedBuilder {
 
   const roleLines = setup.roles.map(
     (r, i) => {
-      const configured = r.maxCount > 0 || (setup.setupPhase === 1 && i < MODAL_PHASE_0_COUNT);
-      const marker = configured ? "\u2705 " : ""; // ✅ prefix only when configured
+      const configured = r.maxCount > 0 || i < setup.setupPhase * ROLES_PER_MODAL;
+      const marker = configured ? "✅ " : ""; // ✅ prefix only when configured
       return `${marker}${r.emoji} **${r.name}**: ${r.maxCount} slots`;
     }
   );
@@ -915,10 +1230,8 @@ function buildSetupEmbed(setup: AttendanceSetup): EmbedBuilder {
     ? `Ping Role: <@&${setup.pingRoleId}>`
     : "Ping Role: *Not selected*";
 
-  const phaseHint =
-    setup.setupPhase === 0
-      ? `Click **"Set Role Counts"** to configure roles 1-${MODAL_PHASE_0_COUNT}.`
-      : `Click **"Set Role Counts"** to configure remaining roles.`;
+  const [startIdx, endIdx] = getModalPartRange(setup.setupPhase, setup.roles.length);
+  const phaseHint = `Click **"Set Role Counts"** to configure roles ${startIdx + 1}-${endIdx}.`;
 
   return new EmbedBuilder()
     .setTitle(`${setup.title} — Setup`)
@@ -938,6 +1251,45 @@ function getConfirmedCount(session: AttendanceSession): number {
   );
 }
 
+function buildCompositionLine(session: AttendanceSession): string | null {
+  const counts = new Map<string, number>();
+  let unset = 0;
+  let total = 0;
+
+  session.roleQueues.forEach((queue, roleIndex) => {
+    for (const signup of queue.slice(0, session.roles[roleIndex].maxCount)) {
+      total++;
+      if (signup.category) {
+        counts.set(signup.category, (counts.get(signup.category) ?? 0) + 1);
+      } else {
+        unset++;
+      }
+    }
+  });
+
+  if (total === 0) return null;
+
+  const parts: string[] = PLAYER_CATEGORIES.map(
+    (c) => `${c.emoji} ${c.name} **${counts.get(c.key) ?? 0}**`
+  );
+  if (unset > 0) parts.push(`${UNSET_EMOJI} Unset **${unset}**`);
+  return parts.join(" · ");
+}
+
+// "🔮 [Witch] name", or "🔥 [Striker] name" (duty icon) for Def Team
+function formatSignupLine(
+  signup: RoleSignup,
+  confirmed: boolean,
+  isDef: boolean
+): string {
+  const icon = isDef
+    ? getDutyEmoji(signup.duty)
+    : PLAYER_CATEGORIES.find((c) => c.key === signup.category)?.emoji ?? UNSET_EMOJI;
+  const name = confirmed ? signup.displayName : `~~${signup.displayName}~~`;
+  const className = signup.className ? `[${signup.className}]` : undefined;
+  return [icon, className, name].filter(Boolean).join(" ");
+}
+
 function buildAttendanceEmbed(session: AttendanceSession): EmbedBuilder {
   const totalSignups = getConfirmedCount(session);
 
@@ -950,21 +1302,16 @@ function buildAttendanceEmbed(session: AttendanceSession): EmbedBuilder {
     if (role.maxCount === 0 && queue.length === 0) continue;
 
     const confirmed = Math.min(queue.length, role.maxCount);
+    const isDef = isDefRole(role);
 
-    let memberList: string;
-    if (queue.length === 0) {
-      memberList = "*No signups yet*";
-    } else {
-      memberList = queue
-        .map((signup, i) => {
-          const num = i + 1;
-          if (i < role.maxCount) {
-            return `${num}. ${signup.displayName}`;
-          }
-          return `${num}. ~~${signup.displayName}~~`;
-        })
-        .join("\n");
-    }
+    const memberList =
+      queue.length === 0
+        ? "*No signups yet*"
+        : fitFieldValue(
+            queue.map((signup, i) =>
+              formatSignupLine(signup, i < role.maxCount, isDef)
+            )
+          );
 
     fields.push({
       name: `${role.emoji} ${role.name} (${confirmed}/${role.maxCount})`,
@@ -978,11 +1325,28 @@ function buildAttendanceEmbed(session: AttendanceSession): EmbedBuilder {
     .setColor(totalSignups >= session.totalSlots ? 0x00ff00 : 0x5865f2)
     .addFields(fields);
 
+  const composition = buildCompositionLine(session);
+  if (composition) embed.setDescription(composition);
+
   if (totalSignups >= session.totalSlots) {
     embed.setFooter({ text: "All slots are filled!" });
   }
 
   return embed;
+}
+
+/** Embed field values are capped at 1024 chars — truncate long rosters. */
+function fitFieldValue(lines: string[]): string {
+  let value = "";
+  for (let i = 0; i < lines.length; i++) {
+    const next = value ? `${value}\n${lines[i]}` : lines[i];
+    const reserve = i < lines.length - 1 ? 24 : 0; // room for the "…and N more" line
+    if (next.length + reserve > FIELD_VALUE_LIMIT) {
+      return `${value}\n…and ${lines.length - i} more`;
+    }
+    value = next;
+  }
+  return value;
 }
 
 // ─── Component Builders ─────────────────────────────────────────────────────
@@ -992,10 +1356,8 @@ function buildSetupComponents(
 ): ActionRowBuilder<ButtonBuilder | RoleSelectMenuBuilder>[] {
   const setupMsgId = setup.messageId;
 
-  const buttonLabel =
-    setup.setupPhase === 0
-      ? `Set Role Counts (1-${MODAL_PHASE_0_COUNT})`
-      : `Set Role Counts (${MODAL_PHASE_0_COUNT + 1}-${ATTENDANCE_ROLES.length})`;
+  const [startIdx, endIdx] = getModalPartRange(setup.setupPhase, setup.roles.length);
+  const buttonLabel = `Set Role Counts (${startIdx + 1}-${endIdx})`;
 
   const roleSetupRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
@@ -1017,6 +1379,10 @@ function buildSetupComponents(
     new ButtonBuilder()
       .setCustomId(`${ATT_ID.SETUP_TITLE}:${setupMsgId}`)
       .setLabel("Set Title")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`${ATT_ID.SETUP_SAVE_TPL}:${setupMsgId}`)
+      .setLabel("Save as Template")
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(`${ATT_ID.SETUP_CONFIRM}:${setupMsgId}`)
@@ -1058,6 +1424,10 @@ function buildAttendanceComponents(
 
   const buttonRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
+      .setCustomId(`${ATT_ID.DETAILS}:${session.messageId}`)
+      .setLabel("My Details")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
       .setCustomId(`${ATT_ID.LEAVE}:${session.messageId}`)
       .setLabel("Leave")
       .setStyle(ButtonStyle.Danger),
@@ -1074,18 +1444,120 @@ function buildAttendanceComponents(
   return [selectRow, buttonRow];
 }
 
+function buildDetailsPanel(
+  session: AttendanceSession,
+  signup: RoleSignup,
+  roleIndex: number
+): { content: string; components: ActionRowBuilder<StringSelectMenuBuilder>[] } {
+  const role = session.roles[roleIndex];
+  const isDef = isDefRole(role);
+  const msgId = session.messageId;
+
+  const category = PLAYER_CATEGORIES.find((c) => c.key === signup.category);
+  const summary = [
+    `Category: ${category ? `${category.emoji} ${category.name}` : `${UNSET_EMOJI} not set`}`,
+    `Class: ${signup.className ?? `${UNSET_EMOJI} not set`}`,
+  ];
+  if (isDef) {
+    const duty = DEF_DUTIES.find((d) => d.key === signup.duty);
+    summary.push(`Duty: ${duty ? `${duty.emoji} ${duty.name}` : `${UNSET_EMOJI} undecided`}`);
+  }
+
+  const content =
+    `**Your details** for **${session.title}** — ${role.emoji} ${role.name}\n` +
+    summary.join(" · ") +
+    `\n-# Saved for next time. Change anytime with **My Details**.`;
+
+  const categorySelect = new StringSelectMenuBuilder()
+    .setCustomId(`${ATT_ID.CATEGORY}:${msgId}`)
+    .setPlaceholder("What are you playing? (Tank / Melee / Mage / Range)")
+    .addOptions(
+      PLAYER_CATEGORIES.map((c) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(c.name)
+          .setValue(c.key)
+          .setEmoji(c.emoji)
+          .setDefault(signup.category === c.key)
+      )
+    );
+
+  const classSelect = (customIdPrefix: string, classes: readonly string[]) =>
+    new StringSelectMenuBuilder()
+      .setCustomId(`${customIdPrefix}:${msgId}`)
+      .setPlaceholder(`Class (${classes[0]} – ${classes[classes.length - 1]})`)
+      .addOptions(
+        classes.map((name) =>
+          new StringSelectMenuOptionBuilder()
+            .setLabel(name)
+            .setValue(name)
+            .setDefault(signup.className === name)
+        )
+      );
+
+  const rows = [
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(categorySelect),
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+      classSelect(ATT_ID.CLASS_A, BDO_CLASSES.slice(0, CLASS_SELECT_SPLIT))
+    ),
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+      classSelect(ATT_ID.CLASS_B, BDO_CLASSES.slice(CLASS_SELECT_SPLIT))
+    ),
+  ];
+
+  if (isDef) {
+    const dutySelect = new StringSelectMenuBuilder()
+      .setCustomId(`${ATT_ID.DUTY}:${msgId}`)
+      .setPlaceholder("Def duty")
+      .addOptions(
+        ...DEF_DUTIES.map((d) =>
+          new StringSelectMenuOptionBuilder()
+            .setLabel(d.name)
+            .setValue(d.key)
+            .setEmoji(d.emoji)
+            .setDefault(signup.duty === d.key)
+        ),
+        new StringSelectMenuOptionBuilder()
+          .setLabel("Undecided")
+          .setValue("none")
+          .setEmoji(UNSET_EMOJI)
+      );
+    rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(dutySelect));
+  }
+
+  return { content, components: rows };
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function hasRequiredDiscordRole(
-  member: GuildMember,
-  attendanceRoleName: string
-): boolean {
-  const requiredSubstring =
-    ATTENDANCE_ROLE_REQUIREMENTS[attendanceRoleName.toLowerCase()];
-  if (!requiredSubstring) return true;
-  return member.roles.cache.some((role) =>
-    role.name.toLowerCase().includes(requiredSubstring)
-  );
+function getModalPartCount(roleCount: number): number {
+  return Math.max(1, Math.ceil(roleCount / ROLES_PER_MODAL));
+}
+
+function getModalPartRange(part: number, roleCount: number): [number, number] {
+  const start = part * ROLES_PER_MODAL;
+  return [start, Math.min(start + ROLES_PER_MODAL, roleCount)];
+}
+
+function isDefRole(role: AttendanceRole): boolean {
+  return role.name === DEF_TEAM_ROLE_NAME;
+}
+
+function getDutyEmoji(duty: DefDuty | undefined): string {
+  return DEF_DUTIES.find((d) => d.key === duty)?.emoji ?? UNSET_EMOJI;
+}
+
+function needsDetails(signup: RoleSignup, role: AttendanceRole): boolean {
+  return !signup.category || !signup.className || (isDefRole(role) && !signup.duty);
+}
+
+function findSignup(
+  session: AttendanceSession,
+  userId: string
+): { signup: RoleSignup; roleIndex: number } | null {
+  const roleIndex = session.userRoles.get(userId);
+  if (roleIndex === undefined) return null;
+  const signup = session.roleQueues[roleIndex]?.find((s) => s.userId === userId);
+  return signup ? { signup, roleIndex } : null;
 }
 
 function getDisplayName(interaction: Interaction): string {

@@ -1,5 +1,6 @@
 import { Client, Events } from "discord.js";
 import { attendanceCommand } from "@/commands/attendance";
+import { attendanceTemplateCommand } from "@/commands/attendanceTemplate";
 import { lfpCommand } from "@/commands/lfp";
 
 export function registerReadyEvent(client: Client): void {
@@ -7,7 +8,7 @@ export function registerReadyEvent(client: Client): void {
     console.log(`Stella Bot is online! Logged in as ${readyClient.user.tag}`);
 
     // Register slash commands
-    await readyClient.application.commands.set([attendanceCommand, lfpCommand]);
+    await readyClient.application.commands.set([attendanceCommand, attendanceTemplateCommand, lfpCommand]);
     console.log("Slash commands registered.");
   });
 }
