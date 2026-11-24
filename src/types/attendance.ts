@@ -41,6 +41,21 @@ export interface AttendanceSession {
   userRoles: Map<string, number>; // userId -> roleIndex (reverse lookup)
 }
 
+/** A confirmed signup flattened for platoon building. */
+export interface PlatoonPlayer {
+  signup: RoleSignup;
+  roleName: string;
+}
+
+export interface PlatoonResult {
+  sessionMessageId: string;
+  title: string;
+  main: PlatoonPlayer[][]; // balanced fighting platoons
+  support: PlatoonPlayer[]; // Def Team + Flex, listed unbalanced
+  warnings: string[];
+  ping: boolean;
+}
+
 /** Remembered per guild member so returning players sign up in one click. */
 export interface PlayerProfile {
   category: PlayerCategory | null;

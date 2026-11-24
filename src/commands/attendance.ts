@@ -29,7 +29,11 @@ import {
   CLASS_SELECT_SPLIT,
   DEF_DUTIES,
   DEF_TEAM_ROLE_NAME,
+  MAIN_PLATOON_COUNT,
+  PLATOON_MAIN_ROLES,
+  PLATOON_SUPPORT_ROLES,
   PLAYER_CATEGORIES,
+  SHOTCALLER_ROLE_NAME,
   UNSET_EMOJI,
 } from "@/constants/attendance";
 import type {
@@ -37,10 +41,13 @@ import type {
   AttendanceSetup,
   AttendanceSession,
   DefDuty,
+  PlatoonPlayer,
+  PlatoonResult,
   PlayerCategory,
   PlayerProfile,
   RoleSignup,
 } from "@/types/attendance";
+import { buildMainPlatoons, isShai } from "@/services/platoons";
 import {
   saveAttendanceSession,
   deleteAttendanceSession,
@@ -261,6 +268,21 @@ export async function handleAttendanceInteraction(
   }
   if (id.startsWith(ATT_ID.MODAL_EDIT_ROSTER + ":")) {
     await handleEditRosterModal(interaction as ModalSubmitInteraction);
+    return true;
+  }
+
+  // Platoons
+  if (id.startsWith(ATT_ID.PLATOONS + ":")) {
+    await handlePlatoonsButton(interaction as ButtonInteraction);
+    return true;
+  }
+  if (
+    id.startsWith(ATT_ID.PLATOON_SHUFFLE + ":") ||
+    id.startsWith(ATT_ID.PLATOON_PING + ":") ||
+    id.startsWith(ATT_ID.PLATOON_POST + ":") ||
+    id.startsWith(ATT_ID.PLATOON_CANCEL + ":")
+  ) {
+    await handlePlatoonPreviewAction(interaction as ButtonInteraction);
     return true;
   }
 
@@ -1212,6 +1234,309 @@ async function handleEditRosterModal(
   await attendanceMessage.edit({ embeds: [embed], components });
 }
 
+// ─── Attendance: Platoons ───────────────────────────────────────────────────
+
+const MESSAGE_CONTENT_LIMIT = 2000;
+
+// Preview state per admin, keyed by `${attendanceMsgId}:${userId}`
+const platoonPreviews = new Map<string, PlatoonResult>();
+
+function isAdmin(interaction: ButtonInteraction): boolean {
+  const member = interaction.member;
+  return (
+    member instanceof GuildMember &&
+    member.permissions.has(PermissionFlagsBits.Administrator)
+  );
+}
+
+/** Confirmed (non-waitlisted) signups for the roles in `roleNames`, in role order. */
+function collectConfirmed(
+  session: AttendanceSession,
+  roleNames: readonly string[]
+): PlatoonPlayer[] {
+  const players: PlatoonPlayer[] = [];
+  for (const roleName of roleNames) {
+    session.roles.forEach((role, roleIndex) => {
+      if (role.name !== roleName) return;
+      for (const signup of session.roleQueues[roleIndex].slice(0, role.maxCount)) {
+        players.push({ signup, roleName: role.name });
+      }
+    });
+  }
+  return players;
+}
+
+function createPlatoonResult(
+  session: AttendanceSession,
+  ping: boolean
+): PlatoonResult | null {
+  const pool = collectConfirmed(session, PLATOON_MAIN_ROLES);
+  const support = collectConfirmed(session, PLATOON_SUPPORT_ROLES);
+  if (pool.length === 0 && support.length === 0) return null;
+
+  const { platoons, warnings } = buildMainPlatoons(pool, MAIN_PLATOON_COUNT);
+  return {
+    sessionMessageId: session.messageId,
+    title: session.title,
+    main: platoons,
+    support,
+    warnings,
+    ping,
+  };
+}
+
+async function handlePlatoonsButton(interaction: ButtonInteraction): Promise<void> {
+  const attendanceMsgId = interaction.customId.split(":")[1];
+
+  const session = activeSessions.get(attendanceMsgId);
+  if (!session) {
+    await interaction.reply({
+      content: "This attendance session has expired.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!isAdmin(interaction)) {
+    await interaction.reply({
+      content: "Only administrators can build platoons.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const result = createPlatoonResult(session, false);
+  if (!result) {
+    await interaction.reply({
+      content: "Nobody has signed up yet, so there's nothing to split.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  platoonPreviews.set(`${attendanceMsgId}:${interaction.user.id}`, result);
+  await interaction.reply({
+    ...buildPlatoonPreview(result),
+    ephemeral: true,
+  });
+}
+
+async function handlePlatoonPreviewAction(
+  interaction: ButtonInteraction
+): Promise<void> {
+  const [prefix, attendanceMsgId] = interaction.customId.split(":");
+  const key = `${attendanceMsgId}:${interaction.user.id}`;
+
+  const preview = platoonPreviews.get(key);
+  if (!preview) {
+    await interaction.update({
+      content: "This preview has expired. Click **Platoons** again.",
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
+  if (prefix === ATT_ID.PLATOON_CANCEL) {
+    platoonPreviews.delete(key);
+    await interaction.update({
+      content: "Platoon preview cancelled.",
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
+  if (prefix === ATT_ID.PLATOON_PING) {
+    preview.ping = !preview.ping;
+    await interaction.update(buildPlatoonPreview(preview));
+    return;
+  }
+
+  const session = activeSessions.get(attendanceMsgId);
+  if (!session) {
+    platoonPreviews.delete(key);
+    await interaction.update({
+      content: "This attendance session has expired.",
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
+  // Rebuild from the live signups so late changes are picked up
+  const fresh = createPlatoonResult(session, preview.ping);
+  if (!fresh) {
+    platoonPreviews.delete(key);
+    await interaction.update({
+      content: "Nobody is signed up any more.",
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
+  if (prefix === ATT_ID.PLATOON_SHUFFLE) {
+    platoonPreviews.set(key, fresh);
+    await interaction.update(buildPlatoonPreview(fresh));
+    return;
+  }
+
+  // Post — use the previewed split as-is so what was approved is what gets posted
+  const channel = interaction.channel;
+  if (!channel?.isSendable()) {
+    await interaction.reply({
+      content: "I can't post in this channel.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  platoonPreviews.delete(key);
+  await interaction.update({
+    content: "Platoons posted.",
+    embeds: [],
+    components: [],
+  });
+
+  const [firstContent, ...extraContent] = preview.ping
+    ? buildPingMessages(preview)
+    : [undefined];
+  const allowedMentions = preview.ping
+    ? { users: allPlatoonPlayers(preview).map((p) => p.signup.userId) }
+    : { parse: [] as never[] };
+
+  await channel.send({
+    content: firstContent,
+    embeds: [buildPlatoonEmbed(preview)],
+    allowedMentions,
+  });
+  for (const content of extraContent) {
+    await channel.send({ content, allowedMentions });
+  }
+}
+
+function allPlatoonPlayers(result: PlatoonResult): PlatoonPlayer[] {
+  return [...result.main.flat(), ...result.support];
+}
+
+/** Mention lines grouped per platoon, split into messages under Discord's content limit. */
+function buildPingMessages(result: PlatoonResult): string[] {
+  const groups: { label: string; players: PlatoonPlayer[] }[] = [
+    ...result.main.map((players, i) => ({ label: `Platoon ${i + 1}`, players })),
+    { label: "Def + Flex", players: result.support },
+  ];
+
+  const lines = groups
+    .filter((g) => g.players.length > 0)
+    .map((g) => `**${g.label}:** ${g.players.map((p) => `<@${p.signup.userId}>`).join(" ")}`);
+
+  const messages: string[] = [];
+  let current = "";
+  for (const line of lines) {
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length > MESSAGE_CONTENT_LIMIT && current) {
+      messages.push(current);
+      current = line;
+    } else {
+      current = next;
+    }
+  }
+  if (current) messages.push(current);
+  return messages;
+}
+
+function buildPlatoonPreview(result: PlatoonResult): {
+  content: string;
+  embeds: EmbedBuilder[];
+  components: ActionRowBuilder<ButtonBuilder>[];
+} {
+  const id = result.sessionMessageId;
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`${ATT_ID.PLATOON_SHUFFLE}:${id}`)
+      .setLabel("Re-shuffle")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`${ATT_ID.PLATOON_PING}:${id}`)
+      .setLabel(result.ping ? "Ping players: ON" : "Ping players: OFF")
+      .setStyle(result.ping ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`${ATT_ID.PLATOON_POST}:${id}`)
+      .setLabel("Post")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`${ATT_ID.PLATOON_CANCEL}:${id}`)
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return {
+    content: "**Preview** — only you can see this. Re-shuffle for another split, then Post.",
+    embeds: [buildPlatoonEmbed(result)],
+    components: [row],
+  };
+}
+
+const CATEGORY_ORDER: (PlayerCategory | undefined)[] = [
+  "healer", "mage", "melee", "range", "tank", undefined,
+];
+
+function platoonSortKey(player: PlatoonPlayer): number {
+  if (player.roleName === SHOTCALLER_ROLE_NAME) return -2;
+  if (isShai(player)) return -1;
+  return CATEGORY_ORDER.indexOf(player.signup.category);
+}
+
+function formatPlatoonLine(player: PlatoonPlayer): string {
+  const line = formatSignupLine(player.signup, true, player.roleName === DEF_TEAM_ROLE_NAME);
+  if (player.roleName === SHOTCALLER_ROLE_NAME) {
+    const emoji = ATTENDANCE_ROLES.find((r) => r.name === SHOTCALLER_ROLE_NAME)?.emoji;
+    return emoji ? `${emoji} ${line}` : line;
+  }
+  return line;
+}
+
+function buildPlatoonEmbed(result: PlatoonResult): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setTitle(`Platoon Split — ${result.title}`)
+    .setColor(0x5865f2);
+
+  result.main.forEach((platoon, i) => {
+    const count = (match: (p: PlatoonPlayer) => boolean) => platoon.filter(match).length;
+    const summary = [
+      `💚 ${count(isShai)} Shai`,
+      `🔮 ${count((p) => p.signup.category === "mage")} Mage`,
+      `🗡️ ${count((p) => p.signup.category === "melee")} Melee`,
+      `🏹 ${count((p) => p.signup.category === "range")} Range`,
+    ].join(" · ");
+
+    const members = [...platoon].sort((a, b) => platoonSortKey(a) - platoonSortKey(b));
+    embed.addFields({
+      name: `⚔️ Platoon ${i + 1} (${platoon.length})`,
+      value: fitFieldValue([`-# ${summary}`, ...members.map(formatPlatoonLine)]),
+      inline: false,
+    });
+  });
+
+  if (result.support.length > 0) {
+    // Def Team first (duty icons), then Flex
+    const def = result.support.filter((p) => p.roleName === DEF_TEAM_ROLE_NAME);
+    const flex = result.support.filter((p) => p.roleName !== DEF_TEAM_ROLE_NAME);
+    embed.addFields({
+      name: `🏰 Def + Flex (${result.support.length})`,
+      value: fitFieldValue([...def, ...flex].map(formatPlatoonLine)),
+      inline: false,
+    });
+  }
+
+  if (result.warnings.length > 0) {
+    embed.setFooter({ text: result.warnings.map((w) => `⚠️ ${w}`).join("\n").slice(0, 2048) });
+  }
+
+  return embed;
+}
+
 // ─── Embed Builders ─────────────────────────────────────────────────────────
 
 function buildSetupEmbed(setup: AttendanceSetup): EmbedBuilder {
@@ -1434,6 +1759,10 @@ function buildAttendanceComponents(
     new ButtonBuilder()
       .setCustomId(`${ATT_ID.EDIT_ROSTER}:${session.messageId}`)
       .setLabel("Edit Roster")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`${ATT_ID.PLATOONS}:${session.messageId}`)
+      .setLabel("Platoons")
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId(`${ATT_ID.CLOSE}:${session.messageId}`)

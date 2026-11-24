@@ -31,6 +31,14 @@ export const DEF_DUTIES = [
 
 export const UNSET_EMOJI = "❔"; // ❔
 
+/** Platoon rules: balanced fighting platoons + one unbalanced Def/Flex platoon. */
+export const MAIN_PLATOON_COUNT = 2;
+export const PLATOON_RULES = { shaiMin: 2, mageMin: 2 } as const;
+export const PLATOON_MAIN_ROLES = ["Mainball", "Shotcaller", "Shai", "ELE"] as const;
+export const PLATOON_SUPPORT_ROLES = ["Def Team", "Flex"] as const;
+export const SHOTCALLER_ROLE_NAME = "Shotcaller";
+export const SHAI_CLASS_NAME = "Shai";
+
 /** All BDO classes (32 as of Agent, July 2026), alphabetical. */
 export const BDO_CLASSES = [
   "Agent", "Archer", "Berserker", "Corsair", "Dark Knight", "Deadeye",
@@ -77,4 +85,9 @@ export const ATT_ID = {
   CLASS_A: "att_class_a",
   CLASS_B: "att_class_b",
   DUTY: "att_duty",
+  PLATOONS: "att_platoons",
+  PLATOON_SHUFFLE: "att_platoon_shuffle",
+  PLATOON_PING: "att_platoon_ping",
+  PLATOON_POST: "att_platoon_post",
+  PLATOON_CANCEL: "att_platoon_cancel",
 } as const;
